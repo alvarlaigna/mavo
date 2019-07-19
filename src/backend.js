@@ -1,21 +1,27 @@
-(function($) {
+(function($, $$) {
 
 /**
  * Base class for all backends
  */
 var _ = Mavo.Backend = $.Class({
 	constructor: function(url, o = {}) {
-		this.source = url;
-		this.url = new URL(this.source, Mavo.base);
-		this.mavo = o.mavo;
-		this.format = Mavo.Formats.create(o.format, this);
+		this.update(url, o);
 
 		// Permissions of this particular backend.
 		this.permissions = new Mavo.Permissions();
 	},
 
+	update: function(url, o = {}) {
+		this.source = url;
+		this.url = new URL(this.source, Mavo.base);
+		this.mavo = o.mavo;
+		this.format = Mavo.Formats.create(o.format, this);
+	},
+
 	get: function(url = new URL(this.url)) {
-		url.searchParams.set("timestamp", Date.now()); // ensure fresh copy
+		if (url.protocol != "data:") {
+			url.searchParams.set("timestamp", Date.now()); // ensure fresh copy
+		}
 
 		return $.fetch(url.href).then(xhr => Promise.resolve(xhr.responseText), () => Promise.resolve(null));
 	},
@@ -24,15 +30,15 @@ var _ = Mavo.Backend = $.Class({
 		return this.ready
 			.then(() => this.get())
 			.then(response => {
-			if (typeof response != "string") {
-				// Backend did the parsing, we're done here
-				return response;
-			}
+				if (typeof response != "string") {
+					// Backend did the parsing, we're done here
+					return response;
+				}
 
-			response = response.replace(/^\ufeff/, ""); // Remove Unicode BOM
+				response = response.replace(/^\ufeff/, ""); // Remove Unicode BOM
 
-			return this.format.parse(response);
-		});
+				return this.format.parse(response);
+			});
 	},
 
 	store: function(data, {path, format = this.format} = {}) {
@@ -49,6 +55,7 @@ var _ = Mavo.Backend = $.Class({
 	ready: Promise.resolve(),
 	login: () => Promise.resolve(),
 	logout: () => Promise.resolve(),
+	put: () => Promise.reject(),
 
 	isAuthenticated: function() {
 		return !!this.accessToken;
@@ -69,26 +76,40 @@ var _ = Mavo.Backend = $.Class({
 	 * Helper for making OAuth requests with JSON-based APIs.
 	 */
 	request: function(call, data, method = "GET", req = {}) {
+		req = $.extend({}, req); // clone
 		req.method = req.method || method;
 		req.responseType = req.responseType || "json";
-		req.headers = req.headers || {};
-		req.headers["Content-Type"] = req.headers["Content-Type"] || "application/json; charset=utf-8";
-		req.data = data;
+
+		req.headers = $.extend({
+			"Content-Type": "application/json; charset=utf-8"
+		}, req.headers || {});
 
 		if (this.isAuthenticated()) {
 			req.headers["Authorization"] = req.headers["Authorization"] || `Bearer ${this.accessToken}`;
 		}
 
+		req.data = data;
+
+		call = new URL(call, this.constructor.apiDomain);
+
+		// Prevent getting a cached response. Cache-control is often not allowed via CORS
+		if (req.method == "GET") {
+			call.searchParams.set("timestamp", Date.now());
+		}
+
 		if ($.type(req.data) === "object") {
 			if (req.method == "GET") {
-				req.data = Object.keys(req.data).map(p => p + "=" + encodeURIComponent(req.data[p])).join("&");
+				for (let p in req.data) {
+					let action = req.data[p] === undefined? "delete" : "set";
+					call.searchParams[action](p, req.data[p]);
+				}
+
+				delete req.data;
 			}
 			else {
 				req.data = JSON.stringify(req.data);
 			}
 		}
-
-		call = new URL(call, this.constructor.apiDomain);
 
 		return $.fetch(call, req)
 			.catch(err => {
@@ -139,6 +160,12 @@ var _ = Mavo.Backend = $.Class({
 					this.authPopup = open(`${this.constructor.oAuth}?client_id=${this.key}&state=${encodeURIComponent(JSON.stringify(state))}` + this.oAuthParams(),
 						"popup", `width=${popup.width},height=${popup.height},left=${popup.left},top=${popup.top}`);
 
+					if (!this.authPopup) {
+						var message = "Login popup was blocked! Please check your popup blocker settings.";
+						this.mavo.error(message);
+						reject(Error(message));
+					}
+
 					addEventListener("message", evt => {
 						if (evt.source === this.authPopup) {
 							if (evt.data.backend == this.id) {
@@ -150,6 +177,18 @@ var _ = Mavo.Backend = $.Class({
 							}
 
 							resolve(this.accessToken);
+
+							// Log in to other similar backends that are logged out
+							for (var appid in Mavo.all) {
+								var storage = Mavo.all[appid].primaryBackend;
+
+								if (storage
+									&& storage.id === this.id
+									&& storage !== this
+									&& !storage.isAuthenticated()) {
+										storage.login(true);
+								}
+							}
 						}
 					});
 				}
@@ -169,7 +208,7 @@ var _ = Mavo.Backend = $.Class({
 
 			this.permissions.off(["edit", "add", "delete", "save"]).on("login");
 
-			this.mavo.element._.fire("mavo:logout", {backend: this});
+			$.fire(this.mavo.element, "mv-logout", {backend: this});
 		}
 
 		return Promise.resolve();
@@ -177,14 +216,24 @@ var _ = Mavo.Backend = $.Class({
 
 	static: {
 		// Return the appropriate backend(s) for this url
-		create: function(url, o) {
-			if (url) {
-				var Backend = _.types.filter(Backend => Backend.test(url))[0] || _.Remote;
+		create: function(url, o, type, existing) {
+			var Backend;
 
-				return new Backend(url, o);
+			if (type) {
+				Backend = Mavo.Functions.get(_, type);
 			}
 
-			return null;
+			if (url && !Backend) {
+				Backend = _.types.filter(Backend => Backend.test(url))[0] || _.Remote;
+			}
+
+			// Can we re-use the existing object perhaps?
+			if (Backend && existing && existing.constructor === Backend && existing.constructor.prototype.hasOwnProperty("update")) {
+				existing.update(url, o);
+				return existing;
+			}
+
+			return Backend? new Backend(url, o) : null;
 		},
 
 		types: [],
@@ -205,6 +254,10 @@ _.register($.Class({
 	extends: _,
 	constructor: function () {
 		this.permissions.on(["read", "edit", "save"]);
+	},
+
+	update: function(url, o) {
+		this.super.update.call(this, url, o);
 
 		this.element = $(this.source) || $.create("script", {
 			type: "application/json",
@@ -268,4 +321,4 @@ _.register($.Class({
 	}
 }));
 
-})(Bliss);
+})(Bliss, Bliss.$);

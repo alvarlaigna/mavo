@@ -1,3 +1,6 @@
 /node_modules
 *.map
-/dist/*
+/dist/maps/
+dist/*.js
+dist/*.css
+local.js

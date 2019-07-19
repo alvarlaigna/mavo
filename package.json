@@ -1,6 +1,6 @@
 {
   "name": "mavo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Create web applications with HTML and CSS",
   "main": "dist/mavo.js",
   "scripts": {
@@ -15,23 +15,28 @@
   "bugs": {
     "url": "https://github.com/mavoweb/mavo/issues"
   },
-  "homepage": "https://github.com/mavoweb/mavo",
+  "homepage": "https://mavo.io",
+  "browserslist": ["last 4 versions", "IE 11"],
   "devDependencies": {
-    "babel-core": "^6.24.0",
-    "babel-preset-env": "^1.2.2",
+    "@babel/core": "^7.4.5",
+    "@babel/plugin-proposal-object-rest-spread": "^7.4.4",
+    "@babel/preset-env": "^7.4.5",
+    "babel-core": "^6.26.3",
+    "babel-preset-env": "^1.7.0",
     "babel-preset-es2015": "^6.5.0",
     "babel-preset-stage-3": "^6.22.0",
-    "gulp": "^3.9.0",
-    "gulp-autoprefixer": "^3.1.0",
-    "gulp-babel": "^6.1.2",
-    "gulp-babili": "0.0.2",
+    "gulp": "^4.0.2",
+    "gulp-autoprefixer": "^6.1.0",
+    "gulp-babel": "^8.0.0",
+    "gulp-babel-minify": "^0.5.0",
     "gulp-concat": "^2.6.0",
-    "gulp-notify": "^2.2.0",
-    "gulp-rename": "^1.2.2",
-    "gulp-replace": "^0.5.4",
-    "gulp-sass": "^2.1.1",
-    "gulp-sourcemaps": "^1.6.0",
+    "gulp-inject-version": "^1.0.1",
+    "gulp-notify": "^3.2.0",
+    "gulp-rename": "^1.4.0",
+    "gulp-replace": "^1.0.0",
+    "gulp-sass": "^4.0.2",
+    "gulp-sourcemaps": "^2.6.5",
     "gulp-util": "^3.0.7",
-    "merge2": "^1.0.2"
+    "merge2": "^1.2.3"
   }
 }

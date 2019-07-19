@@ -31,7 +31,7 @@ Object.defineProperties(_, {
 			if (config.extend) {
 				var base = _[config.extend];
 
-				config = $.extend($.extend({}, base, p => p != "selector"), config);
+				config = $.extend($.extend({}, base), config);
 			}
 
 			if (id.indexOf("@") > -1) {
@@ -48,15 +48,14 @@ Object.defineProperties(_, {
 			config.id = id;
 
 			if (Array.isArray(config.attribute)) {
-				for (var attribute of config.attribute) {
-					o = $.extend({}, config);
+				config.attribute.forEach(attribute => {
+					var o = $.extend({}, config);
 					o.attribute = attribute;
 
 					_[`${id}@${attribute}`] = o;
-				}
+				});
 			}
 			else {
-
 				_[id] = config;
 			}
 
@@ -66,6 +65,11 @@ Object.defineProperties(_, {
 	"search": {
 		value: function(element, attribute, datatype) {
 			var matches = _.matches(element, attribute, datatype);
+
+			if (matches.length === 0 && datatype) {
+				// 0 matches, try again without datatype
+				matches = _.matches(element, attribute);
+			}
 
 			var lastMatch = matches[matches.length - 1];
 
@@ -100,6 +104,7 @@ Object.defineProperties(_, {
 
 				// Passes selector test?
 				var selector = o.selector || id;
+
 				if (!element.matches(selector)) {
 					continue;
 				}
@@ -158,106 +163,26 @@ _.register({
 		selector: "img, video, audio",
 		attribute: "src",
 		editor: function() {
-			var uploadBackend = this.mavo.storage && this.mavo.storage.upload? this.mavo.storage : this.uploadBackend;
+			var kind = this.element.nodeName.toLowerCase();
+			kind = kind == "img"? "image" : kind;
+			Mavo.setAttributeShy(this.element, "mv-uploads", kind + "s");
 
-			var mainInput = $.create("input", {
-				"type": "url",
-				"placeholder": "http://example.com/image.png",
-				"className": "mv-output",
-				"aria-label": "URL to image"
-			});
+			return this.createUploadPopup(kind + "/*", kind, "png");
+		}
+	},
 
-			if (uploadBackend && self.FileReader) {
-				var popup;
-				var type = this.element.nodeName.toLowerCase();
-				type = type == "img"? "image" : type;
-				var path = this.element.getAttribute("mv-uploads") || type + "s";
+	"a, link": {
+		default: true,
+		attribute: "href"
+	},
 
-				var upload = (file, name = file.name) => {
-					if (file && file.type.indexOf(type + "/") === 0) {
-						this.mavo.upload(file, path + "/" + name).then(url => {
-							mainInput.value = url;
-
-							var attempts = 0;
-
-							var checkIfLoaded = Mavo.rr(() => {
-								return $.fetch(url + "?" + Date.now())
-									.then(() => {
-										this.mavo.inProgress = false;
-										$.fire(mainInput, "input");
-									})
-									.catch(xhr => {
-										if (xhr.status > 400 && attempts < 10) {
-											this.mavo.inProgress = "Loading Image";
-											attempts++;
-											return Mavo.timeout(2000).then(checkIfLoaded);
-										}
-									});
-							});
-						});
-					}
-				};
-
-				var uploadEvents = {
-					"paste": evt => {
-						var item = evt.clipboardData.items[0];
-
-						if (item.kind == "file" && item.type.indexOf(type + "/") === 0) {
-							// Is a file of the correct type, upload!
-							var name = `pasted-${type}-${Date.now()}.${item.type.slice(6)}`; // image, video, audio are all 5 chars
-							upload(item.getAsFile(), name);
-							evt.preventDefault();
-						}
-					},
-					"drag dragstart dragend dragover dragenter dragleave drop": evt => {
-						evt.preventDefault();
-						evt.stopPropagation();
-					},
-					"dragover dragenter": evt => {
-						popup.classList.add("mv-dragover");
-						this.element.classList.add("mv-dragover");
-					},
-					"dragleave dragend drop": evt => {
-						popup.classList.remove("mv-dragover");
-						this.element.classList.remove("mv-dragover");
-					},
-					"drop": evt => {
-						upload(evt.dataTransfer.files[0]);
-					}
-				};
-
-				$.events(this.element, uploadEvents);
-
-				return popup = $.create({
-					className: "mv-upload-popup",
-					contents: [
-						mainInput, {
-							tag: "input",
-							type: "file",
-							"aria-label": "Upload image",
-							accept: type + "/*",
-							events: {
-								change: evt => {
-									var file = evt.target.files[0];
-
-									if (!file) {
-										return;
-									}
-
-									upload(file);
-								}
-							}
-						}, {
-							className: "mv-tip",
-							innerHTML: "<strong>Tip:</strong> You can also drag & drop or paste!"
-						}
-					],
-					events: uploadEvents
-				});
-			}
-			else {
-				return mainInput;
-			}
+	"a[mv-uploads], link[mv-uploads]": {
+		default: true,
+		attribute: "href",
+		editor: function() {
+			var type = this.element.getAttribute("type");
+			var ext = type && !/\/\*$/.test(type)? type.split("/")[1] : "pdf";
+			return this.createUploadPopup(type, undefined, ext);
 		}
 	},
 
@@ -266,9 +191,9 @@ _.register({
 		datatype: "boolean"
 	},
 
-	"a, link": {
-		default: true,
-		attribute: "href"
+	"details": {
+		attribute: "open",
+		datatype: "boolean"
 	},
 
 	"input, select, button, textarea": {
@@ -277,7 +202,7 @@ _.register({
 	},
 
 	"formControl": {
-		selector: "select, input",
+		selector: "input",
 		default: true,
 		attribute: "value",
 		modes: "edit",
@@ -289,8 +214,15 @@ _.register({
 		}
 	},
 
+	"select": {
+		extend: "formControl",
+		selector: "select",
+		subtree: true
+	},
+
 	"textarea": {
 		extend: "formControl",
+		selector: "textarea",
 		attribute: null,
 		getValue: element => element.value,
 		setValue: (element, value) => element.value = value
@@ -299,7 +231,32 @@ _.register({
 	"formNumber": {
 		extend: "formControl",
 		selector: "input[type=range], input[type=number]",
-		datatype: "number"
+		datatype: "number",
+		setValue: function(element, value) {
+			element.value = value;
+			element.setAttribute("value", value);
+
+			var attribute = value > element.value? "max" : "min";
+
+			if (!isNaN(value) && element.value != value && !Mavo.data(element, "boundObserver")) {
+				// Value out of bounds, maybe race condition? See #295
+				// Observe min/max attrs until user interaction or data change
+				var observer = new Mavo.Observer(element, attribute, r => {
+					element.value = value;
+				});
+
+				requestAnimationFrame(() => {
+					$.bind(element, "input mv-change", function handler() {
+						observer.destroy();
+						Mavo.data(element, "boundObserver", undefined);
+						$.unbind(element, "input mv-change", handler);
+					});
+				});
+
+				// Prevent creating same observer twice
+				Mavo.data(element, "boundObserver", observer);
+			}
+		}
 	},
 
 	"checkbox": {
@@ -310,8 +267,9 @@ _.register({
 		changeEvents: "click"
 	},
 
-	"input[type=radio]": {
+	"radio": {
 		extend: "formControl",
+		selector: "input[type=radio]",
 		attribute: "checked",
 		modes: "edit",
 		getValue: element => {
@@ -367,7 +325,7 @@ _.register({
 			var range = max - min;
 			var step = +this.element.getAttribute("mv-edit-step") || (range > 1? 1 : range/100);
 
-			this.element.addEventListener("mousemove.mavo:edit", evt => {
+			$.bind(this.element, "mousemove.mavo:edit", evt => {
 				// Change property as mouse moves
 				var left = this.element.getBoundingClientRect().left;
 				var offset = Math.max(0, (evt.clientX - left) / this.element.offsetWidth);
@@ -380,17 +338,17 @@ _.register({
 				this.sneak(() => this.element.setAttribute("value", newValue));
 			});
 
-			this.element.addEventListener("mouseleave.mavo:edit", evt => {
+			$.bind(this.element, "mouseleave.mavo:edit", evt => {
 				// Return to actual value
 				this.sneak(() => this.element.setAttribute("value", this.value));
 			});
 
-			this.element.addEventListener("click.mavo:edit", evt => {
+			$.bind(this.element, "click.mavo:edit", evt => {
 				// Register change
 				this.value = this.getValue();
 			});
 
-			this.element.addEventListener("keydown.mavo:edit", evt => {
+			$.bind(this.element, "keydown.mavo:edit", evt => {
 				// Edit with arrow keys
 				if (evt.target == this.element && (evt.keyCode == 37 || evt.keyCode == 39)) {
 					var increment = step * (evt.keyCode == 39? 1 : -1) * (evt.shiftKey? 10 : 1);
@@ -415,9 +373,10 @@ _.register({
 
 	"block": {
 		default: true,
-		selector: "p, div, li, dt, dd, h1, h2, h3, h4, h5, h6, article, section, address",
+		selector: "p, div, dt, dd, h1, h2, h3, h4, h5, h6, article, section, address",
 		editor: function() {
-			var display = getComputedStyle(this.element).display;
+			var cs = getComputedStyle(this.element);
+			var display = cs.display;
 			var tag = display.indexOf("inline") === 0? "input" : "textarea";
 			var editor = $.create(tag);
 
@@ -428,6 +387,13 @@ _.register({
 				if (width) {
 					editor.width = width;
 				}
+
+				// We cannot collapse whitespace because then users
+				// are adding characters they don’t see (#300).
+				editor.style.whiteSpace = ({
+					"normal": "pre-wrap",
+					"nowrap": "pre"
+				})[cs.whiteSpace] || "inherit";
 			}
 
 			return editor;
@@ -462,7 +428,6 @@ _.register({
 		init: function() {
 			if (!this.fromTemplate("dateType")) {
 				var dateFormat = Mavo.DOMExpression.search(this.element, null);
-
 				var datetime = this.element.getAttribute("datetime") || "YYYY-MM-DD";
 
 				for (var type in this.config.dateTypes) {
@@ -477,20 +442,28 @@ _.register({
 					// TODO what about mv-expressions?
 					this.element.textContent = this.config.defaultFormats[this.dateType](this.property);
 					this.mavo.expressions.extract(this.element, null);
+
+					if (dateFormat = Mavo.DOMExpression.search(this.element, null)) {
+						this.mavo.treeBuilt.then(() => {
+							dateFormat.update();
+						});
+					}
 				}
 			}
 		},
 		dateTypes: {
-			"date": /^[Y\d]{4}-[M\d]{2}-[D\d]{2}$/i,
 			"month": /^[Y\d]{4}-[M\d]{2}$/i,
 			"time": /^[H\d]{2}:[M\d]{2}/i,
-			"datetime-local": /^[Y\d]{4}-[M\d]{2}-[D\d]{2} [H\d]{2}:[M\d]{2}/i
+			"datetime-local": /^[Y\d]{4}-[M\d]{2}-[D\d]{2} [H\d]{2}:[Mi\d]{2}/i,
+			"date": /^[Y\d]{4}-[M\d]{2}-[D\d]{2}$/i,
 		},
 		defaultFormats: {
-			"date": property => `[day(${property})] [month(${property}).shortname] [year(${property})]`,
-			"month": property => `[month(${property}).name] [year(${property})]`,
-			"time": property => `[hour(${property}).twodigit]:[minute(${property}).twodigit]`,
-			"datetime-local": property => `[day(${property})] [month(${property}).shortname] [year(${property})]`
+			"date": name => `[day(${name})] [month(${name}, 'shortname')] [year(${name})]`,
+			"month": name => `[month(${name}, 'name')] [year(${name})]`,
+			"time": name => `[hour(${name}, '00')]:[minute(${name}, '00')]`,
+			"datetime-local": function(name) {
+				return this.date(name) + " " + this.time(name);
+			}
 		},
 		editor: function() {
 			return {tag: "input", type: this.dateType};
@@ -512,17 +485,27 @@ _.register({
 		popup: true
 	},
 
-	"[role=checkbox]": {
+	".mv-toggle": {
 		default: true,
 		attribute: "aria-checked",
 		datatype: "boolean",
 		edit: function() {
-			this.element.addEventListener("click.mavo:edit", evt => {
-				this.value = !this.value;
-				evt.preventDefault();
+			Mavo.revocably.setAttribute(this.element, "role", "checkbox");
+
+			$.bind(this.element, "click.mavo:edit keyup.mavo:edit keydown.mavo:edit", evt => {
+				if (evt.type == "click" || evt.key == " " || evt.key == "Enter") {
+					if (evt.type != "keydown") {
+						this.value = !this.value;
+					}
+
+					evt.preventDefault();
+					evt.stopPropagation();
+				}
 			});
 		},
 		done: function() {
+			Mavo.revocably.restoreAttribute(this.element, "role");
+
 			$.unbind(this.element, ".mavo:edit");
 		}
 	}

@@ -5,7 +5,7 @@ var _ = Mavo.UI.Itembar = $.Class({
 		this.item = item;
 
 		this.element = $$(`.mv-item-bar:not([mv-rel]), .mv-item-bar[mv-rel="${this.item.property}"]`, this.item.element).filter(el => {
-				// Remove item controls meant for other collections
+				// Ignore item controls meant for other collections
 				return el.closest(Mavo.selectors.multiple) == this.item.element && !Mavo.data(el, "item");
 			})[0];
 
@@ -20,22 +20,33 @@ var _ = Mavo.UI.Itembar = $.Class({
 				className: "mv-item-bar mv-ui"
 			});
 
+			var bottomUp = this.collection.bottomUp;
+			var args = `$item${bottomUp? ", $index + 1" : ""}`;
 			var buttons = [
 				{
 					tag: "button",
-					title: "Delete this " + this.item.name,
-					className: "mv-delete"
+					type: "button",
+					title: this.mavo._("delete-item", this.item),
+					className: "mv-delete",
+					// Why $item and not this.collection.property?
+					// If there's a nested property with the same name, the name will refer to that
+					// However, this means that if we place the item bar inside another item, the button will not work anymore
+					// It's a tradeoff, and perhaps if it proves to be a problem we can start detecting which one is best
+					"mv-action": "delete($item)"
 				}, {
 					tag: "button",
-					title: `Add new ${this.item.name} ${this.collection.bottomUp? "after" : "before"}`,
-					className: "mv-add"
+					type: "button",
+					title: this.mavo._(`add-item-${bottomUp? "after" : "before"}`, this.item),
+					className: "mv-add",
+					"mv-action": `if($cmd, add($item, ${args}), add(${args}))`
 				}
 			];
 
 			if (this.item instanceof Mavo.Group) {
 				this.dragHandle = $.create({
 					tag: "button",
-					title: "Drag to reorder " + this.item.name,
+					type: "button",
+					title: this.mavo._("drag-to-reorder", this.item),
 					className: "mv-drag-handle"
 				});
 
@@ -51,7 +62,11 @@ var _ = Mavo.UI.Itembar = $.Class({
 			});
 		}
 
-		$.events(this.element, {
+		this.element.setAttribute("hidden", "");
+
+		$.bind([this.item.element, this.element], "focusin mouseover", this);
+
+		$.bind(this.element, {
 			mouseenter: evt => {
 				this.item.element.classList.add("mv-highlight");
 			},
@@ -71,48 +86,86 @@ var _ = Mavo.UI.Itembar = $.Class({
 			}
 		});
 
-		var selectors = {
-			add: this.buttonSelector("add"),
-			delete: this.buttonSelector("delete"),
-			drag: this.buttonSelector("drag")
-		};
-
-		this.element.addEventListener("click", evt => {
-			if (this.item.collection.editing) {
-				if (evt.target.matches(selectors.add)) {
-					var newItem = this.collection.add(null, this.item.index);
-
-					if (evt[Mavo.superKey]) {
-						newItem.render(this.item.data);
-					}
-
-					Mavo.scrollIntoViewIfNeeded(newItem.element);
-
-					return this.collection.editItem(newItem);
-				}
-				else if (evt.target.matches(selectors.delete)) {
-					this.item.collection.delete(item);
-				}
-				else if (evt.target.matches(selectors["drag-handle"])) {
-					evt => evt.target.focus();
-				}
-			}
-		});
+		if (this.dragHandle !== this.item.element) {
+			this.dragHandle.addEventListener("click", evt => evt.target.focus());
+		}
 
 		Mavo.data(this.element, "item", this.item);
 	},
 
-	add: function() {
-		if (!this.element.parentNode) {
-			if (!Mavo.revocably.add(this.element)) {
-				if (this.item instanceof Mavo.Primitive && !this.item.attribute) {
-					this.element.classList.add("mv-adjacent");
-					$.after(this.element, this.item.element);
-				}
-				else {
-					this.item.element.appendChild(this.element);
+	destroy: function() {
+		this.hide();
+	},
+
+	show: function(sticky) {
+		_.visible.forEach(instance => {
+			if (instance != this && (!this.sticky || instance.sticky)) {
+				clearTimeout(instance.hideTimeout);
+				instance.hide(sticky, _.DELAY);
+			}
+		});
+
+		_.visible.add(this);
+
+		if (this.element.hasAttribute("hidden") || sticky && !this.sticky) {
+			this.element.removeAttribute("hidden");
+			this.sticky = this.sticky || sticky;
+			$.bind([this.item.element, this.element], "focusout mouseleave", this);
+		}
+	},
+
+	hide: function(sticky, timeout = 0) {
+		if (!this.sticky || sticky) {
+			if (timeout) {
+				this.hideTimeout = setTimeout(() => this.hide(sticky), timeout);
+			}
+			else {
+				this.element.setAttribute("hidden", "");
+				$.unbind([this.item.element, this.element], "focusout mouseleave", this);
+				this.sticky = false;
+				_.visible.delete(this);
+			}
+
+		}
+	},
+
+	handleEvent: function(evt) {
+		var sticky = evt.type.indexOf("mouse") === -1;
+
+		if (this.isWithinItem(evt.target)) {
+			clearTimeout(this.hideTimeout);
+
+			if (["mouseleave", "focusout", "blur"].indexOf(evt.type) > -1) {
+				if (!this.isWithinItem(evt.relatedTarget)) {
+					this.hide(sticky, _.DELAY);
 				}
 			}
+			else {
+				this.show(sticky);
+				evt.stopPropagation();
+			}
+		}
+	},
+
+	isWithinItem: function(element) {
+		if (!element) {
+			return false;
+		}
+
+		var itemBar = element.closest(".mv-item-bar");
+		return itemBar? itemBar === this.element : element.closest(Mavo.selectors.item) === this.item.element;
+	},
+
+	add: function() {
+		if (!this.element.parentNode && !Mavo.revocably.add(this.element)) {
+			// Has not been added before
+			var tag = this.item.element.nodeName.toLowerCase();
+
+			if (tag in _.container) {
+				var rel = $(_.container[tag], this.item.element);
+			}
+
+			(rel || this.item.element).appendChild(this.element);
 		}
 
 		if (this.dragHandle == this.item.element) {
@@ -128,23 +181,23 @@ var _ = Mavo.UI.Itembar = $.Class({
 		}
 	},
 
-	reposition: function() {
-		if (this.item instanceof Mavo.Primitive) {
-			// This is only needed for lists of primitives, because the item element
-			// does not contain the minibar. In lists of groups, this can be harmful
-			// because it will remove custom positioning
-			this.element.remove();
-			this.add();
+	live: {
+		sticky: function(v) {
+			this.element.classList.toggle("mv-sticky", v);
 		}
-	},
-
-	buttonSelector: function(type) {
-		return `.mv-${type}[mv-rel="${this.item.property}"], [mv-rel="${this.item.property}"] > .mv-${type}`;
 	},
 
 	proxy: {
 		collection: "item",
 		mavo: "item"
+	},
+
+	static: {
+		DELAY: 100,
+		visible: new Set(),
+		container: {
+			"details": "summary"
+		}
 	}
 });
 

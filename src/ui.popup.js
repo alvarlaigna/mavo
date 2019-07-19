@@ -9,15 +9,28 @@ var _ = Mavo.UI.Popup = $.Class({
 			var bounds = this.primitive.element.getBoundingClientRect();
 			var x = bounds.left;
 			var y = bounds.bottom;
+			var pointDown = false;
 
 			if (this.element.offsetHeight) {
 				// Is in the DOM, check if it fits
-				var popupBounds = this.element.getBoundingClientRect();
+				this.height = this.element.getBoundingClientRect().height || this.height;
+			}
 
-				if (popupBounds.height + y > innerHeight) {
-					y = innerHeight - popupBounds.height - 20;
+			if (this.height + y + 20 > innerHeight) {
+				// Normal positioning means the popup would be cut off or too close to the edge, adjust
+
+				// Perhaps placing it above is better
+				if (bounds.top - this.height > 20) {
+					var pointDown = true;
+					y = bounds.top - this.height - 20;
+				}
+				else {
+					// Nah, just raise it a bit
+					y = innerHeight - this.height - 20;
 				}
 			}
+
+			this.element.classList.toggle("mv-point-down", pointDown);
 
 			$.style(this.element, { top:  `${y}px`, left: `${x}px` });
 		};
@@ -54,6 +67,11 @@ var _ = Mavo.UI.Popup = $.Class({
 		if (this.editor.matches("select")) {
 			this.editor.size = Math.min(10, this.editor.children.length);
 		}
+		this.hideCallback = evt => {
+			if (!this.element.contains(evt.target) && !this.primitive.element.contains(evt.target)) {
+				this.hide();
+			}
+		};
 	},
 
 	show: function() {
@@ -61,25 +79,27 @@ var _ = Mavo.UI.Popup = $.Class({
 
 		this.shown = true;
 
-		this.hideCallback = evt => {
-			if (!this.element.contains(evt.target) && !this.primitive.element.contains(evt.target)) {
-				this.hide();
-			}
-		};
+		this.element.style.transition = "none";
+		this.element.removeAttribute("hidden");
 
 		this.position();
 
+		this.element.setAttribute("hidden", "");
+		this.element.style.transition = "";
+
 		document.body.appendChild(this.element);
 
-		requestAnimationFrame(e => this.element.removeAttribute("hidden")); // trigger transition
+		setTimeout(() => {
+			this.element.removeAttribute("hidden");
+		}, 100); // trigger transition. rAF or timeouts < 100 don't seem to, oddly.
 
-		$.events(document, "focus click", this.hideCallback, true);
-		window.addEventListener("scroll", this.position);
+		$.bind(document, "focus click", this.hideCallback, true);
+		window.addEventListener("scroll", this.position, {passive: true});
 	},
 
 	hide: function() {
 		$.unbind(document, "focus click", this.hideCallback, true);
-		window.removeEventListener("scroll", this.position);
+		window.removeEventListener("scroll", this.position, {passive: true});
 		this.element.setAttribute("hidden", ""); // trigger transition
 		this.shown = false;
 
@@ -89,7 +109,7 @@ var _ = Mavo.UI.Popup = $.Class({
 	},
 
 	prepare: function() {
-		$.events(this.primitive.element, {
+		$.bind(this.primitive.element, {
 			"click.mavo:edit": evt => {
 				this.show();
 			},

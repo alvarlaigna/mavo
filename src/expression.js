@@ -1,34 +1,53 @@
-(function($) {
-
-Mavo.attributes.push("mv-expressions");
+(function($, $$) {
 
 var _ = Mavo.Expression = $.Class({
 	constructor: function(expression) {
 		this.expression = expression;
 	},
 
-	eval: function(data) {
-		this.oldValue = this.value;
-
+	eval: function(data = Mavo.Data.stub, o) {
 		Mavo.hooks.run("expression-eval-beforeeval", this);
 
-		try {
-			if (!this.function) {
-				this.function = _.compile(this.expression);
-				this.identifiers = this.expression.match(/[$a-z][$\w]*/ig) || [];
+		if (!this.function) {
+			try {
+				this.function = Mavo.Script.compile(this.expression, o);
 			}
+			catch (error) {
+				// Compilation error
+				this.error(`There is something wrong with the expression ${this.expression}`,
+					error.message,
+					"Not an expression? See https://mavo.io/docs/expressions/#disabling-expressions for information on how to disable expressions."
+				);
 
-			this.value = this.function(data);
+				Mavo.hooks.run("expression-compile-error", {context: this, error});
+
+				return this.function = error;
+			}
 		}
-		catch (exception) {
-			console.info("%cExpression error!", "color: red; font-weight: bold", `${exception.message} in expression ${this.expression}`);
-
-			Mavo.hooks.run("expression-eval-error", {context: this, exception});
-
-			this.value = exception;
+		else if (this.function instanceof Error) {
+			// Previous compilation error
+			return this.function;
 		}
 
-		return this.value;
+		try {
+			return this.function(data);
+		}
+		catch (error) {
+			// Runtime error
+			this.error(`Something went wrong with the expression ${this.expression}`,
+				error.message,
+				`Data was: ${JSON.stringify(data)}`
+			);
+
+			Mavo.hooks.run("expression-eval-error", {context: this, error});
+
+			return error;
+		}
+	},
+
+	error(title, ...message) {
+		message = message.join("\n");
+		console.info(`%cOops! 😳 ${title}:`, "color: #c04; font-weight: bold;", message);
 	},
 
 	toString() {
@@ -36,143 +55,30 @@ var _ = Mavo.Expression = $.Class({
 	},
 
 	changedBy: function(evt) {
-		if (!evt) {
-			return true;
-		}
-
-		if (!this.identifiers) {
-			return false;
-		}
-
-		if (this.identifiers.indexOf(evt.property) > -1) {
-			return true;
-		}
-
-		if (Mavo.Functions.intersects(evt.properties, this.identifiers)) {
-			return true;
-		}
-
-		if (evt.action != "propertychange") {
-			if (Mavo.Functions.intersects(["$index", "$previous", "$next"], this.identifiers)) {
-				return true;
-			}
-
-			var collection = evt.node.collection || evt.node;
-
-			if (Mavo.Functions.intersects(collection.properties, this.identifiers)) {
-				return true;
-			}
-		}
-
-		return false;
+		return _.changedBy(this.identifiers, evt);
 	},
 
 	live: {
 		expression: function(value) {
-			var code = value = value;
-
 			this.function = null;
+			this.identifiers = value.match(/[$a-z][$\w]*/ig) || [];
 		}
 	},
-
-	static: {
-		/**
-		 * These serializers transform the AST into JS
-		 */
-		serializers: {
-			"BinaryExpression": node => `${_.serialize(node.left)} ${node.operator} ${_.serialize(node.right)}`,
-			"UnaryExpression": node => `${node.operator}${_.serialize(node.argument)}`,
-			"CallExpression": node => `${_.serialize(node.callee)}(${node.arguments.map(_.serialize).join(", ")})`,
-			"ConditionalExpression": node => `${_.serialize(node.test)}? ${_.serialize(node.consequent)} : ${_.serialize(node.alternate)}`,
-			"MemberExpression": node => `get(${_.serialize(node.object)}, "${node.property.name || node.property.value}")`,
-			"ArrayExpression": node => `[${node.elements.map(_.serialize).join(", ")}]`,
-			"Literal": node => node.raw,
-			"Identifier": node => node.name,
-			"ThisExpression": node => "this",
-			"Compound": node => node.body.map(_.serialize).join(" ")
-		},
-
-		/**
-		 * These are run before the serializers and transform the expression to support MavoScript
-		 */
-		transformations: {
-			"BinaryExpression": node => {
-				let name = Mavo.Script.getOperatorName(node.operator);
-				let details = Mavo.Script.operators[name];
-
-				// Flatten same operator calls
-				var nodeLeft = node;
-				var args = [];
-
-				do {
-					args.unshift(nodeLeft.right);
-					nodeLeft = nodeLeft.left;
-				} while (Mavo.Script.getOperatorName(nodeLeft.operator) === name);
-
-				args.unshift(nodeLeft);
-
-				if (args.length > 1) {
-					return `${name}(${args.map(_.serialize).join(", ")})`;
-				}
-			},
-			"CallExpression": node => {
-				if (node.callee.type == "Identifier" && node.callee.name == "if") {
-					node.callee.name = "iff";
-				}
-			}
-		},
-
-		serialize: node => {
-			if (_.transformations[node.type]) {
-				var ret = _.transformations[node.type](node);
-
-				if (ret !== undefined) {
-					return ret;
-				}
-			}
-
-			return _.serializers[node.type](node);
-		},
-
-		rewrite: function(code) {
-			try {
-				return _.serialize(_.parse(code));
-			}
-			catch (e) {
-				// Parsing as MavoScript failed, falling back to plain JS
-				return code;
-			}
-		},
-
-		compile: function(code) {
-			code = _.rewrite(code);
-
-			return new Function("data", `with(Mavo.Functions._Trap)
-					with (data || {}) {
-						return ${code};
-					}`);
-		},
-
-		parse: self.jsep,
-	}
 });
-
-if (self.jsep) {
-	jsep.addBinaryOp("and", 2);
-	jsep.addBinaryOp("or", 2);
-	jsep.addBinaryOp("=", 6);
-	jsep.addBinaryOp("mod", 10);
-	jsep.removeBinaryOp("===");
-}
-
-_.serializers.LogicalExpression = _.serializers.BinaryExpression;
-_.transformations.LogicalExpression = _.transformations.BinaryExpression;
 
 _.Syntax = $.Class({
 	constructor: function(start, end) {
 		this.start = start;
 		this.end = end;
-		this.regex = RegExp(`${Mavo.escapeRegExp(start)}([\\S\\s]+?)${Mavo.escapeRegExp(end)}`, "gi");
+		// Try to parse anything between start and end as an expression. Note
+		// that this parses text that we don't want to treat as expressions,
+		// including the empty expression, but we want to parse them out anyway
+		// and only later decide not to evaluate them as expressions so that we
+		// don't parse, say, [][1] as a single expression containing "][1".
+
+		// Regex note: "[\S\s]" matches all characters, unlike ".", which
+		// doesn't match newlines.
+		this.regex = RegExp(`${Mavo.escapeRegExp(start)}([\\S\\s]*?)${Mavo.escapeRegExp(end)}`, "gi");
 	},
 
 	test: function(str) {
@@ -194,7 +100,14 @@ _.Syntax = $.Class({
 
 			lastIndex = this.regex.lastIndex;
 
-			ret.push(new Mavo.Expression(match[1]));
+			if (/\S/.test(match[1])) {
+				ret.push(new Mavo.Expression(match[1]));
+			}
+			else {
+				// If the matched expression is empty or consists only of
+				// whitespace, don't treat it as an expression.
+				ret.push(match[0]);
+			}
 		}
 
 		// Literal at the end
@@ -223,4 +136,4 @@ _.Syntax = $.Class({
 
 _.Syntax.default = new _.Syntax("[", "]");
 
-})(Bliss);
+})(Bliss, Bliss.$);

@@ -6,47 +6,62 @@ var _ = Mavo.UI.Bar = $.Class({
 	constructor: function(mavo) {
 		this.mavo = mavo;
 
-		this.element = $(".mv-bar", this.mavo.element) || $.create({
-			className: "mv-bar mv-ui",
-			start: this.mavo.element,
-			innerHTML: "<button>&nbsp;</button>"
-		});
+		this.element = $(".mv-bar", this.mavo.element);
+		this.template = this.mavo.element.getAttribute("mv-bar") || "";
+
+		if (this.element) {
+			this.custom = true;
+			this.template += " " + (this.element.getAttribute("mv-bar") || "");
+			this.template = this.template.trim();
+
+			for (let id in _.controls) {
+				this[id] = $(`.mv-${id}`, this.element);
+
+				if (this[id]) {
+					this.template = this.template || "with";
+					this.template += ` ${id}`;
+				}
+			}
+		}
+		else {
+			this.element = $.create({
+				className: "mv-bar mv-ui",
+				start: this.mavo.element,
+				innerHTML: "<button>&nbsp;</button>"
+			});
+		}
 
 		if (this.element.classList.contains("mv-compact")) {
 			this.noResize = true;
 		}
 
-		this.order = this.mavo.element.getAttribute("mv-bar") || this.element.getAttribute("mv-bar");
+		this.controls = _.getControls(this.template);
 
-		if (this.order) {
-			this.order = this.order == "none"? [] : this.order.split(/\s+/);
-		}
-		else {
-			this.order = Object.keys(_.controls);
-		}
-
-		this.order = this.order.filter(id => _.controls[id]);
-
-		if (this.order.length) {
+		if (this.controls.length) {
 			// Measure height of 1 row
 			this.targetHeight = this.element.offsetHeight;
 		}
 
-		this.element.innerHTML = "";
+		if (!this.custom) {
+			this.element.innerHTML = "";
+		}
 
-		for (let id of this.order) {
+		this.controls.forEach(id => {
 			let o = _.controls[id];
 
-			if (o.create) {
-				this[id] = o.create.call(this.mavo);
+			if (this[id]) {
+				// Custom control, remove to not mess up order
+				this[id].remove();
 			}
-			else {
-				var label = o.label || Mavo.Functions.readable(id);
 
+			if (o.create) {
+				this[id] = o.create.call(this.mavo, this[id]);
+			}
+			else if (!this[id]) {
 				this[id] = $.create("button", {
+					type: "button",
 					className: `mv-${id}`,
-					textContent: label,
-					title: label
+					textContent: this.mavo._(id)
 				});
 			}
 
@@ -66,19 +81,24 @@ var _ = Mavo.UI.Bar = $.Class({
 			}
 
 			for (var events in o.events) {
-				$.events(this[id], events, o.events[events].bind(this.mavo));
+				$.bind(this[id], events, o.events[events].bind(this.mavo));
 			}
+		});
+
+		for (let id in _.controls) {
+			let o = _.controls[id];
 
 			if (o.action) {
-				$.delegate(this.element, "click", ".mv-" + id, () => {
+				$.delegate(this.mavo.element, "click", ".mv-" + id, evt => {
 					if (!o.permission || this.permissions.is(o.permission)) {
 						o.action.call(this.mavo);
+						evt.preventDefault();
 					}
 				});
 			}
 		}
 
-		if (this.order.length && !this.noResize) {
+		if (this.controls.length && !this.noResize) {
 			this.resize();
 
 			if (self.ResizeObserver) {
@@ -100,13 +120,27 @@ var _ = Mavo.UI.Bar = $.Class({
 
 		this.element.classList.remove("mv-compact", "mv-tiny");
 
+		// Remove pointless tooltips
+		$$("button, .mv-button", this.element).forEach(button => {
+			if (button.title === button.textContent) {
+				button.title = "";
+			}
+		});
+
 		// Exceeded single row?
-		if (this.element.offsetHeight > this.targetHeight * 1.5) {
+		if (this.element.offsetHeight > this.targetHeight * 1.6) {
 			this.element.classList.add("mv-compact");
 
 			if (this.element.offsetHeight > this.targetHeight * 1.2) {
 				// Still too tall
 				this.element.classList.add("mv-tiny");
+
+				// Add tooltips, since only icons will be visible
+				$$("button, .mv-button", this.element).forEach(button => {
+					if (!button.title) {
+						button.title = button.textContent;
+					}
+				});
 			}
 		}
 
@@ -114,7 +148,7 @@ var _ = Mavo.UI.Bar = $.Class({
 	},
 
 	add: function(id) {
-		var o =_.controls[id];
+		var o = _.controls[id];
 
 		if (o.prepare) {
 			o.prepare.call(this.mavo);
@@ -150,31 +184,74 @@ var _ = Mavo.UI.Bar = $.Class({
 	},
 
 	static: {
+		getControls: function(template) {
+			var all = Object.keys(_.controls);
+
+			if (template && (template = template.trim())) {
+				if (template == "none") {
+					return [];
+				}
+
+				var relative = /^with\s|\b(yes|no)-\w+\b/.test(template);
+				template = template.replace(/\byes-|^with\s+/g, "");
+				var ids = template.split(/\s+/);
+
+				// Drop duplicates (last one wins)
+				ids = Mavo.Functions.unique(ids.reverse()).reverse();
+
+				if (relative) {
+					return all.filter(id => {
+						var positive = ids.lastIndexOf(id);
+						var negative = ids.lastIndexOf("no-" + id);
+						var keep = positive > Math.max(-1, negative);
+						var drop = negative > Math.max(-1, positive);
+
+						return keep || (!_.controls[id].optional && !drop);
+					});
+				}
+
+				return ids;
+			}
+
+			// No template, return default set
+			return all.filter(id => !_.controls[id].optional);
+		},
+
 		controls: {
 			status: {
-				create: function() {
-					var status = $.create({
+				create: function(custom) {
+					return custom || $.create({
 						className: "mv-status"
 					});
-
-					return status;
 				},
 				prepare: function() {
 					var backend = this.primaryBackend;
 
 					if (backend && backend.user) {
 						var user = backend.user;
-						var html = user.name || "";
+						var html = [user.name || ""];
 
 						if (user.avatar) {
-							html = `<img class="mv-avatar" src="${user.avatar}" /> ${html}`;
+							html.unshift($.create("img", {
+								className: "mv-avatar",
+								src: user.avatar
+							}), " ");
 						}
 
 						if (user.url) {
-							html = `<a href="${user.url}" target="_blank">${html}</a>`;
+							html = [$.create("a", {
+								href: user.url,
+								target: "_blank",
+								contents: html
+							})];
 						}
 
-						this.bar.status.innerHTML = html;
+						this.bar.status.textContent = "";
+						$.contents(this.bar.status, [
+							{tag: "span", innerHTML: this._("logged-in-as", backend)},
+							" ",
+							...html
+						]);
 					}
 				},
 				permission: "logout"
@@ -184,16 +261,25 @@ var _ = Mavo.UI.Bar = $.Class({
 				action: function() {
 					if (this.editing) {
 						this.done();
+						this.bar.edit.textContent = this._("edit");
 					}
 					else {
 						this.edit();
+						this.bar.edit.textContent = this._("editing");
 					}
 				},
 				permission: ["edit", "add", "delete"],
 				cleanup: function() {
 					if (this.editing) {
 						this.done();
+
+						if (this.bar && this.bar.edit) {
+							this.bar.edit.textContent = this._("edit");
+						}
 					}
+				},
+				condition: function() {
+					return this.needsEdit;
 				}
 			},
 
@@ -215,11 +301,85 @@ var _ = Mavo.UI.Bar = $.Class({
 				}
 			},
 
-			clear: {
-				action: function() {
-					this.clear();
+			export: {
+				create: function(custom) {
+					var a;
+
+					if (custom) {
+						a = custom.matches("a")? custom : $.create("a", {
+							className: "mv-button",
+							around: custom
+						});
+					}
+					else {
+						a = $.create("a", {
+							className: "mv-export mv-button",
+							textContent: this._("export")
+						});
+					}
+
+					a.setAttribute("download", this.id + ".json");
+
+					return a;
 				},
-				permission: "delete"
+				events: {
+					mousedown: function() {
+						this.bar.export.href = "data:application/json;charset=UTF-8," + encodeURIComponent(this.toJSON());
+					}
+				},
+				permission: "edit",
+				optional: true
+			},
+
+			import: {
+				create: function(custom) {
+					var button = custom || $.create("span", {
+						role: "button",
+						tabIndex: "0",
+						className: "mv-import mv-button",
+						textContent: this._("import"),
+						events: {
+							focus: evt => {
+								input.focus();
+							}
+						}
+					});
+
+					var input = $.create("input", {
+						type: "file",
+						inside: button,
+						events: {
+							change: evt => {
+								var file = evt.target.files[0];
+
+								if (file) {
+									var reader = $.extend(new FileReader(), {
+										onload: evt => {
+											this.inProgress = false;
+
+											try {
+												var json = JSON.parse(reader.result);
+												this.render(json);
+											}
+											catch (e) {
+												this.error(this._("cannot-parse"));
+											}
+										},
+										onerror: evt => {
+											this.error(this._("problem-loading"));
+										}
+									});
+
+									this.inProgress = this._("uploading");
+									reader.readAsText(file);
+								}
+							}
+						}
+					});
+
+					return button;
+				},
+				optional: true
 			},
 
 			login: {
@@ -235,7 +395,7 @@ var _ = Mavo.UI.Bar = $.Class({
 				},
 				permission: "logout"
 			}
-		}
+		},
 	}
 });
 

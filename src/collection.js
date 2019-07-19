@@ -1,95 +1,189 @@
 (function($, $$) {
 
-Mavo.attributes.push("mv-multiple", "mv-order", "mv-accepts");
+Mavo.attributes.push("mv-multiple", "mv-order", "mv-accepts", "mv-initial-items", "mv-like");
 
-var _ = Mavo.Collection = $.Class({
-	extends: Mavo.Node,
-	nodeType: "Collection",
-	constructor: function (element, mavo, o) {
+var _ = Mavo.Collection = class Collection extends Mavo.Node {
+	constructor (element, mavo, o) {
+		super(element, mavo, o);
+
 		/*
 		 * Create the template, remove it from the DOM and store it
 		 */
 		this.templateElement = this.element;
 
 		this.children = [];
+		this.liveData = new Mavo.Data(this, []);
 
-		// ALL descendant property names as an array
-		if (!this.fromTemplate("mutable", "templateElement", "accepts")) {
-			this.mutable = this.templateElement.matches(Mavo.selectors.multiple);
-			this.accepts = (this.templateElement.getAttribute("mv-accepts") || "").split(/\s+/);
+		// Keep position of the template in the DOM, since we might remove it
+		this.marker = document.createComment("mv-marker");
+		Mavo.data(this.marker, "collection", this);
+
+		this.templateElement.after(this.marker);
+		this.addButton = this.createAddButton();
+
+		if (this.mavo.root || !this.templateElement.hasAttribute("mv-like")) {
+			// Synchronous init
+			this.init();
+		}
+		else {
+			// Async init, we're borrowing the template from elsewhere so we need
+			// to give the rest of the tree a chance to initialize
+			this.mavo.treeBuilt.then(() => this.init());
+		}
+	}
+
+	createAddButton() {
+		// Find add button if provided, or generate one
+		var selector = `button.mv-add-${this.property}`;
+		var group = this.parentGroup.element;
+
+		var button = $$(selector, group).filter(button => {
+			return !this.templateElement.contains(button)  // is outside the template element
+				&& !Mavo.data(button, "collection"); // and does not belong to another collection
+		})[0];
+
+		if (button) {
+			// Custom add button
+			if (button.compareDocumentPosition(this.marker) & Node.DOCUMENT_POSITION_FOLLOWING) {
+				// Button precedes collection, make collection bottom-up if no mv-order is set
+				Mavo.setAttributeShy(this.templateElement, "mv-order", "desc");
+			}
+
+			Mavo.revocably.remove(button);
+		}
+		else {
+			button = $.create("button", {
+				type: "button",
+				className: "mv-ui",
+				textContent: this.mavo._("add-item", this)
+			});
+		};
+
+		button.classList.add("mv-add", `mv-add-${this.property}`);
+		Mavo.data(button, "collection", this);
+
+		Mavo.setAttributeShy(button, "mv-action", `add(${this.property})`);
+
+		return button;
+	}
+
+	init () {
+		if (!this.fromTemplate("templateElement", "accepts", "initialItems", "like", "likeNode")) {
+			this.like = this.templateElement.getAttribute("mv-like");
+
+			if (this.like) {
+				var candidates = [];
+				this.mavo.walk(obj => {
+					if (obj instanceof _ && obj.property === this.like && obj !== this) {
+						candidates.push(obj);
+					}
+				});
+
+				if (candidates.length > 0) {
+					// If there are multiple collections that match,
+					// compare the paths and select the one that has the most overlap
+					this.likeNode = candidates.sort((a, b) => {
+						return a.pathFrom(this).length - b.pathFrom(this).length
+					})[0];
+
+					this.likeNode = this.likeNode.likeNode || this.likeNode;
+					this.likeNode = this.likeNode.template || this.likeNode;
+				}
+				else {
+					this.like = null;
+				}
+			}
+
+			this.accepts = this.templateElement.getAttribute("mv-accepts");
+			this.accepts = new Set(this.accepts && this.accepts.split(/\s+/) || []);
+
+			this.initialItems = +(this.templateElement.getAttribute("mv-initial-items") || (this.like? 0 : 1));
 
 			// Must clone because otherwise once expressions are parsed on the template element
 			// we will not be able to pick them up from subsequent items
 			this.templateElement = this.templateElement.cloneNode(true);
 		}
 
-		var item = this.createItem(this.element);
-		this.add(item, undefined, {silent: true});
-		this.itemTemplate = item.template || item;
+		if (this.likeNode) {
+			this.itemTemplate = this.likeNode.itemTemplate || this.likeNode;
+
+			var templateElement = this.likeNode.templateElement || $.value(this.likeNode.collection, "templateElement") || this.likeNode.element;
+			this.templateElement = templateElement.cloneNode(true);
+			this.templateElement.setAttribute("property", this.property);
+
+			if (!this.accepts.size) {
+				this.accepts = this.likeNode.accepts || this.accepts;
+			}
+		}
+		else if (this.initialItems > 0 || !this.template) {
+			var item = this.createItem(this.element);
+			this.add(item, undefined, {silent: true});
+		}
+
+		this.mavo.treeBuilt.then(() => {
+			if (!this.initialItems) {
+				if (item) {
+					this.delete(item, {silent: true});
+				}
+				else {
+					// No item to delete
+					this.element.remove();
+				}
+			}
+			else if (this.initialItems > 1) {
+				// Add extra items
+				for (let i=1; i<this.initialItems; i++) {
+					this.add();
+				}
+			}
+		});
 
 		this.postInit();
 
 		Mavo.hooks.run("collection-init-end", this);
-	},
+	}
 
 	get length() {
 		return this.children.length;
-	},
+	}
 
-	getData: function(o = {}) {
+	getData (o = {}) {
 		var env = {
 			context: this,
-			options: o,
-			data: []
+			options: o
 		};
 
-		for (var item of this.children) {
-			if (!item.deleted || env.options.live) {
-				let itemData = item.getData(env.options);
-
-				if (itemData !== null || env.options.live) {
-					env.data.push(itemData);
-				}
-			}
-		}
-
-		if (!this.mutable) {
-			// If immutable, drop nulls
-
-			env.data = env.data.filter(item => item !== null);
-
-			if (env.options.live && env.data.length === 1) {
-				// If immutable with only 1 item, return the item
-				// See https://github.com/LeaVerou/mavo/issues/50#issuecomment-266079652
-				env.data = env.data[0];
-			}
-			else if (this.data && !env.options.live) {
-				var rendered = Mavo.subset(this.data, this.inPath);
-				env.data = env.data.concat(rendered.slice(env.data.length));
-			}
-		}
+		env.data = this.children.map(item => item.getData(env.options))
+		                     .filter(itemData => Mavo.value(itemData) !== null)
+		env.data = Mavo.subset(this.data, this.inPath, env.data);
 
 		Mavo.hooks.run("node-getdata-end", env);
 
 		return env.data;
-	},
+	}
 
 	// Create item but don't insert it anywhere
 	// Mostly used internally
-	createItem: function (element) {
+	createItem (element) {
 		if (!element) {
 			element = this.templateElement.cloneNode(true);
 		}
 
+		var template = this.itemTemplate || (this.template? this.template.itemTemplate : null);
+
 		var item = Mavo.Node.create(element, this.mavo, {
 			collection: this,
-			template: this.itemTemplate || (this.template? this.template.itemTemplate : null),
+			template,
 			property: this.property,
 			type: this.type
 		});
 
+		if (!this.itemTemplate) {
+			this.itemTemplate = template || item;
+		}
+
 		return item;
-	},
+	}
 
 	/**
 	 * Add a new item to this collection
@@ -97,7 +191,7 @@ var _ = Mavo.Collection = $.Class({
 	 * @param index {Number} Optional. Index of existing item, will be added opposite to list direction
 	 * @param silent {Boolean} Optional. Throw a datachange event? Mainly used internally.
 	 */
-	add: function(item, index, o = {}) {
+	add (item, index, o = {}) {
 		if (item instanceof Node) {
 			item = Mavo.Node.get(item) || this.createItem(item);
 		}
@@ -109,18 +203,13 @@ var _ = Mavo.Collection = $.Class({
 			this.adopt(item);
 		}
 
-		if (this.mutable) {
-			// Add it to the DOM, or fix its place
-			var rel = this.children[index]? this.children[index].element : this.marker;
-			$[this.bottomUp? "after" : "before"](item.element, rel);
+		if (index === undefined) {
+			index = this.bottomUp? 0 : this.length;
+		}
 
-			if (index === undefined) {
-				index = this.bottomUp? 0 : this.length;
-			}
-		}
-		else {
-			index = this.length;
-		}
+		// Add it to the DOM, or fix its place
+		var rel = this.children[index]? this.children[index].element : this.marker;
+		$.before(item.element, rel);
 
 		var env = {context: this, item};
 
@@ -133,10 +222,6 @@ var _ = Mavo.Collection = $.Class({
 			index: index,
 			add: env.item
 		});
-
-		if (env.item.itembar) {
-			env.item.itembar.reposition();
-		}
 
 		if (this.mavo.expressions.active && !o.silent) {
 			requestAnimationFrame(() => {
@@ -154,37 +239,40 @@ var _ = Mavo.Collection = $.Class({
 		Mavo.hooks.run("collection-add-end", env);
 
 		return env.item;
-	},
+	}
 
-	splice: function(...actions) {
-		for (let action of actions) {
+	splice (...actions) {
+		actions.forEach(action => {
 			if (action.index === undefined && action.remove && isNaN(action.remove)) {
 				// Remove is an item
 				action.index = this.children.indexOf(action.remove);
 				action.remove = 1;
 			}
-		}
+		});
 
 		// Sort in reverse index order
 		actions.sort((a, b) => b.index - a.index);
+
+		var changed = [], deleted = [];
 
 		// FIXME this could still result in buggy behavior.
 		// Think of e.g. adding items on i, then removing > 1 items on i-1.
 		// The new items would get removed instead of the old ones.
 		// Not a pressing issue though since we always remove 1 max when adding things too.
-		for (let action of actions) {
+		actions.forEach(action => {
 			if (action.index > -1 && (action.remove || action.add)) {
 				action.remove = action.remove || 0;
 				action.add = Mavo.toArray(action.add);
-
-				this.children.splice(action.index, +action.remove, ...action.add);
+				deleted.push(...this.children.splice(action.index, +action.remove, ...action.add));
 			}
-		}
+		});
 
-		var changed = [];
+		deleted = new Set(deleted);
 
+		// Update indices
 		for (let i = 0; i < this.length; i++) {
 			let item = this.children[i];
+			deleted.delete(item);
 
 			if (item && item.index !== i) {
 				item.index = i;
@@ -192,15 +280,29 @@ var _ = Mavo.Collection = $.Class({
 			}
 		}
 
-		return changed;
-	},
+		// Unregister expressions for deleted items
+		deleted.forEach(item => {
+			if (item.expressions) {
+				item.expressions.forEach(domexpression => {
+					item.mavo.expressions.unregister(domexpression);
+				});
+			}
+		});
 
-	adopt: function(item) {
+		this.liveData.update();
+
+		return changed;
+	}
+
+	// Move item to this collection from another collection
+	adopt (item) {
 		if (item.collection) {
 			// It belongs to another collection, delete from there first
 			item.collection.splice({remove: item});
 			item.collection.dataChanged("delete");
 		}
+
+		item.collection = this;
 
 		 // Update collection & closestCollection properties
 		this.walk(obj => {
@@ -210,11 +312,11 @@ var _ = Mavo.Collection = $.Class({
 
 			// Belongs to another Mavo?
 			if (item.mavo != this.mavo) {
-				item.mavo = this.mavo;
+				obj.mavo = this.mavo;
 			}
-		});
 
-		item.collection = this;
+			obj.path = obj.getPath();
+		});
 
 		// Adjust templates and their copies
 		if (item.template) {
@@ -222,237 +324,193 @@ var _ = Mavo.Collection = $.Class({
 
 			item.template = this.itemTemplate;
 		}
-	},
+	}
 
-	delete: function(item, hard) {
-		if (hard) {
-			// Hard delete
-			$.remove(item.element);
-			this.splice({remove: item});
-			item.destroy();
-			return;
+	delete (item, {silent, undoable = !silent, transition = !silent, destroy = !undoable} = {}) {
+		item.element.classList.remove("mv-highlight");
+
+		this.splice({remove: item});
+
+		if (!silent && transition) {
+			var stage2 = $.transition(item.element, {opacity: 0}).then(() => {
+				item.element.style.opacity = "";
+			});
+		}
+		else {
+			var stage2 = Promise.resolve();
 		}
 
-		return $.transition(item.element, {opacity: 0}).then(() => {
-			item.deleted = true; // schedule for deletion
-			item.element.style.opacity = "";
+		return stage2.then(() => {
+			$.remove(item.element);
 
-			item.dataChanged("delete");
+			if (!silent) {
+				this.unsavedChanges = item.unsavedChanges = this.mavo.unsavedChanges = true;
 
-			this.unsavedChanges = item.unsavedChanges = this.mavo.unsavedChanges = true;
+				item.collection.dataChanged("delete", {index: item.index});
+			}
+
+			if (undoable) {
+				this.mavo.setDeleted(item);
+			}
+			else if (destroy) {
+				item.destroy();
+			}
+
+			return item;
 		});
-	},
+	}
 
 	/**
 	 * Move existing item to a new position. Wraps around if position is out of bounds.
 	 * @offset relative position
 	 */
-	move: function(item, offset) {
-		index = item.index + offset + (offset > 0);
+	move (item, offset) {
+		var index = item.index + offset + (offset > 0);
 
 		index = Mavo.wrap(index, this.children.length + 1);
 
 		this.add(item, index);
+	}
 
-		if (item instanceof Mavo.Primitive && item.itembar) {
-			item.itembar.reposition();
-		}
-	},
-
-	editItem: function(item, o = {}) {
+	editItem (item, o = {}) {
 		var when = o.immediately? Promise.resolve() : Mavo.inView.when(item.element);
 
 		return when.then(() => {
-			if (this.mutable) {
-				if (!item.itembar) {
-					item.itembar = new Mavo.UI.Itembar(item);
-				}
-
-				item.itembar.add();
+			if (!item.itembar) {
+				item.itembar = new Mavo.UI.Itembar(item);
 			}
+
+			item.itembar.add();
 
 			return item.edit(o);
 		});
-	},
+	}
 
-	edit: function(o = {}) {
-		if (this.super.edit.call(this) === false) {
+	edit (o = {}) {
+		if (super.edit() === false) {
 			return false;
 		}
 
-		if (this.mutable) {
-			// Insert the add button if it's not already in the DOM
-			if (!this.addButton.parentNode) {
-				var tag = this.element.tagName.toLowerCase();
-				var containerSelector = Mavo.selectors.container[tag];
-				var rel = containerSelector? this.marker.parentNode.closest(containerSelector) : this.marker;
-				$[this.bottomUp? "before" : "after"](this.addButton, rel);
+		// Insert the add button if it's not already in the DOM
+		if (!this.addButton.parentNode) {
+			var tag = this.element.tagName.toLowerCase();
+
+			if (tag in Mavo.selectors.container) {
+				var rel = this.marker.parentNode.closest(Mavo.selectors.container[tag]);
+			}
+			else if (this.bottomUp && this.children[0]) {
+				var rel = this.children[0].element;
 			}
 
-			// Set up drag & drop
-			_.dragula.then(() => {
-				this.getDragula();
-			});
+			rel = rel || this.marker;
+			Mavo.revocably.add(this.addButton, e => $[this.bottomUp? "before" : "after"](e, rel));
 		}
+
+		// Set up drag & drop
+		_.dragula.then(() => {
+			this.getDragula();
+		});
 
 		// Edit items, maybe insert item bar
 		return Promise.all(this.children.map(item => this.editItem(item, o)));
-	},
+	}
 
-	done: function() {
-		if (this.super.done.call(this) === false) {
+	done () {
+		if (super.done() === false) {
 			return false;
 		}
 
-		if (this.mutable) {
-			if (this.addButton.parentNode) {
-				this.addButton.remove();
+		Mavo.revocably.remove(this.addButton);
+
+		this.propagate(item => {
+			if (item.itembar) {
+				item.itembar.remove();
 			}
+		});
+	}
 
-			this.propagate(item => {
-				if (item.itembar) {
-					item.itembar.remove();
-				}
-			});
-		}
-	},
+	dataChanged (action, o = {}) {
+		o.element = o.element || this.marker;
+		return super.dataChanged(action, o);
+	}
 
-	/**
-	 * Delete all items in the collection. Not undoable.
-	 */
-	clear: function() {
-		if (this.modes == "read") {
+	dataRender (data, o = {}) {
+		if (data === undefined) {
 			return;
 		}
 
-		if (this.mutable) {
-			for (var i = 1, item; item = this.children[i]; i++) {
-				item.element.remove();
-				item.destroy();
-			}
+		data = data === null? [] : Mavo.toArray(data).filter(i => i !== null);
+		var changed = false;
 
-			this.children = this.children.slice(0, 1);
+		// First render on existing items
+		for (var i = 0; i < this.children.length; i++) {
+			var item = this.children[i];
 
-			this.dataChanged("clear");
-		}
-
-		this.propagate("clear");
-	},
-
-	dataChanged: function(action, o = {}) {
-		o.element = o.element || this.marker;
-		return this.super.dataChanged.call(this, action, o);
-	},
-
-	save: function() {
-		for (let item of this.children) {
-			if (item.deleted) {
-				this.delete(item, true);
+			if (i < data.length) {
+				changed = item.render(data[i], o) || changed;
 			}
 			else {
-				item.unsavedChanges = false;
+				changed = true;
+				this.delete(item, {silent: true});
+				i--;
 			}
 		}
-	},
 
-	propagated: ["save"],
+		if (data.length > i) {
+			// There are still remaining items
+			// Using document fragments improves performance by 60%
+			var fragment = document.createDocumentFragment();
 
-	dataRender: function(data) {
-		if (!data) {
-			return;
-		}
+			for (var j = i; j < data.length; j++) {
+				var item = this.createItem();
 
-		data = Mavo.toArray(data);
+				changed = item.render(data[j], o) || changed;
 
-		if (!this.mutable) {
-			this.children.forEach((item, i) => item.render(data && data[i]));
-		}
-		else {
-			// First render on existing items
-			for (var i = 0; i < this.children.length; i++) {
-				if (i < data.length) {
-					this.children[i].render(data[i]);
-				}
-				else {
-					this.children[i].dataChanged("delete");
-					this.delete(this.children[i], true);
-				}
+				this.children.push(item);
+				item.index = j;
+
+				fragment.appendChild(item.element);
+
+				var env = {context: this, item};
+				Mavo.hooks.run("collection-add-end", env);
+
 			}
 
-			if (data.length > i) {
-				// There are still remaining items
-				// Using document fragments improves performance by 60%
-				var fragment = document.createDocumentFragment();
+			this.marker.before(fragment);
+		}
 
-				for (var j = i; j < data.length; j++) {
-					var item = this.createItem();
+		this.liveData.update();
 
-					item.render(data[j]);
-
-					this.children.push(item);
-					item.index = j;
-
-					fragment.appendChild(item.element);
-
-					var env = {context: this, item};
-					Mavo.hooks.run("collection-add-end", env);
-				}
-
-				if (this.bottomUp) {
-					$.after(fragment, i > 0? this.children[i-1].element : this.marker);
-				}
-				else {
-					$.before(fragment, this.marker);
-				}
-
-				for (var j = i; j < this.children.length; j++) {
-					this.children[j].dataChanged("add");
-				}
+		if (data.length > i) {
+			for (var j = i; j < this.children.length; j++) {
+				this.children[j].dataChanged("add");
 			}
 		}
-	},
 
-	find: function(property, o = {}) {
-		var items = this.children.filter(item => !item.deleted);
+		return changed;
+	}
 
-		if (this.property == property) {
-			return o.collections? this : items;
-		}
-
-		if (this.properties.has(property)) {
-			var ret = items.map(item => item.find(property, o));
-
-			return Mavo.flatten(ret);
-		}
-	},
-
-	isCompatible: function(c) {
-		return c && this.itemTemplate.nodeType == c.itemTemplate.nodeType && (c === this
+	isCompatible (c) {
+		return c && this.itemTemplate.constructor == c.itemTemplate.constructor && (c === this
 		       || c.template == this || this.template == c || this.template && this.template == c.template
-		       || this.accepts.indexOf(c.property) > -1);
-	},
+		       || this.accepts.has(c.property) > -1);
+	}
 
-	live: {
-		mutable: function(value) {
-			if (value && value !== this.mutable) {
-				// Why is all this code here? Because we want it executed
-				// every time mutable changes, not just in the constructor
-				// (think multiple elements with the same property name, where only one has mv-multiple)
-				this._mutable = value;
+	// Make sure to remove reference to .dragula
+	// it seems to cause problem on OS chrome.
+	destroy () {
+		super.destroy();
 
-				// Keep position of the template in the DOM, since we might remove it
-				this.marker = document.createComment("mv-marker");
-				Mavo.data(this.marker, "collection", this);
-
-				var ref = this.templateElement.parentNode? this.templateElement : this.children[this.length - 1].element;
-
-				$.after(this.marker, ref);
-			}
+		if (this.dragula) {
+			this.dragula.destroy();
+			this.dragula = null;
 		}
-	},
+
+		this.propagate("destroy");
+	}
 
 	// Make sure to only call after dragula has loaded
-	getDragula: function() {
+	getDragula () {
 		if (this.dragula) {
 			return this.dragula;
 		}
@@ -466,11 +524,12 @@ var _ = Mavo.Collection = $.Class({
 		this.dragula = dragula({
 			containers: [this.marker.parentNode],
 			isContainer: el => {
-				if (this.accepts.length) {
-					return Mavo.flatten(this.accepts.map(property => this.mavo.root.find(property, {collections: true})))
-								.filter(c => c && c instanceof _)
-								.map(c => c.marker.parentNode)
-								.indexOf(el) > -1;
+				if (this.accepts.size) {
+					return Array.from(el.childNodes).some(child => {
+						var collection = _.get(child);  // Map children to any associated collections
+
+						return collection && this.accepts.has(collection.property);
+					});
 				}
 
 				return false;
@@ -521,89 +580,68 @@ var _ = Mavo.Collection = $.Class({
 		_.dragulas.push(this.dragula);
 
 		return this.dragula;
-	},
+	}
 
+	getClosestCollection () {
+		return this;
+	}
+
+	static get (element) {
+		// Is it an add button or a marker?
+		var collection = Mavo.data(element, "collection");
+
+		if (collection) {
+			return collection;
+		}
+
+		// Maybe it's a collection item?
+		var item = Mavo.Node.get(element);
+
+		return item && item.collection || null;
+	}
+
+	// Delete multiple items from potentially multiple collections or even multiple mavos
+	static delete (nodes, o = {}) {
+		var deleted = new Mavo.BucketMap({arrays: true}); // Mavos and deleted items
+		var collections = new Set(); // Collections items were deleted from
+		var options = {silent: true, undoable: false, destroy: false};
+		var promises = nodes
+			.filter(node => !!node.collection) // Drop nodes that are not collection items
+			.map(node => {
+				collections.add(node.collection);
+				return node.collection.delete(node, options)
+				           .then(node => deleted.set(node.mavo, node))
+			});
+
+		if (!o.silent) {
+			Promise.all(promises).then(() => {
+				collections.forEach(collection => {
+					collection.dataChanged("delete");
+				});
+
+				if (o.undoable !== false) {
+					deleted.forEach((nodes, mavo) => {
+						mavo.setDeleted(...nodes);
+					});
+				}
+			});
+		}
+	}
+};
+
+$.Class(_, {
 	lazy: {
 		bottomUp: function() {
-			/*
+			/**
 			 * Add new items at the top or bottom?
 			 */
 
-			if (!this.mutable) {
-				return false;
-			}
-
-			var order = this.templateElement.getAttribute("mv-order");
-			if (order !== null) {
-				// Attribute has the highest priority and overrides any heuristics
-				return /^desc\b/i.test(order);
-			}
-
-			if (!this.addButton.parentNode) {
-				// If add button not in DOM, do the default
-				return false;
-			}
-
-			// If add button is already in the DOM and *before* our template, then we default to prepending
-			return !!(this.addButton.compareDocumentPosition(this.marker) & Node.DOCUMENT_POSITION_FOLLOWING);
-		},
-
-		closestCollection: function() {
-			var parent = this.marker? this.marker.parentNode : this.templateElement.parentNode;
-
-			return parent.closest(Mavo.selectors.multiple);
-		},
-
-		addButton: function() {
-			// Find add button if provided, or generate one
-			var selector = `button.mv-add-${this.property}`;
-			var group = this.closestCollection || this.marker.parentNode.closest(Mavo.selectors.group);
-
-			if (group) {
-				var button = $$(selector, group).filter(button => {
-					return !this.templateElement.contains(button);
-				})[0];
-			}
-
-			if (!button) {
-				button = $.create("button", {
-					className: "mv-add",
-					textContent: "Add " + this.name
-				});
-			};
-
-			button.classList.add("mv-ui", "mv-add");
-			Mavo.data(button, "collection", this);
-
-			if (this.property) {
-				button.classList.add(`mv-add-${this.property}`);
-			}
-
-			button.addEventListener("click", evt => {
-				evt.preventDefault();
-
-				this.editItem(this.add());
-			});
-
-			return button;
+			return /^desc\b/i.test(this.templateElement.getAttribute("mv-order"));
 		}
 	},
 
 	static: {
 		dragulas: [],
-		get: element => {
-			// Is it an add button or a marker?
-			var collection = Mavo.data(element, "collection");
-
-			if (collection) {
-				return collection;
-			}
-
-			// Maybe it's a collection item?
-			var item = Mavo.Node.get(element);
-
-			return item && item.collection || null;
-		},
 
 		lazy: {
 			dragula: () => $.include(self.dragula, "https://cdnjs.cloudflare.com/ajax/libs/dragula/3.7.2/dragula.min.js")
